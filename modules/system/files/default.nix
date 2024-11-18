@@ -11,10 +11,10 @@ let
 
   rawFiles = filterAttrs (n: v: v.enable) config.system.file;
 
-  files = mapAttrs' (name: value: nameValuePair value.target {
-    type = "link";
+  files = mapAttrs' (name: value: nameValuePair value.target ({
+    type = if value.copy then "copy" else "link";
     inherit (value) source;
-  }) rawFiles;
+  } // lib.optionalAttrs value.copy { inherit (value) hash knownSha256Hashes; })) rawFiles;
 
   linksJSON = pkgs.writeText "system-files.json" (builtins.toJSON {
     version = 1;

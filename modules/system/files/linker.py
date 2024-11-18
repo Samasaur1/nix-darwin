@@ -1,4 +1,5 @@
 from collections import namedtuple
+from hashlib import file_digest
 from sys import argv
 import json
 import os
@@ -62,7 +63,39 @@ for path in new_files['files']:
                 problems.append(path)
         else:
             # The file is a regular file
-            problems.append(path)
+            with open(path, "rb") as file:
+                hash = file_digest(file, "sha256").hexdigest()
+            if hash in new_file['knownSha256Hashes']:
+                # This is a file we're okay with overwriting,
+                # whether or not it was managed by nix-darwin
+                transactions.append(Transaction(new_file['source'], path, new_file['type']))
+            else:
+                # We can't unconditionally overwrite this file. However,
+                # if the file was part of the previous configuration and
+                # is unchanged since the last activation, we can overwrite it
+                if path in old_files['files']:
+                    # The old generation had a file at this path
+                    if old_files['files'][path]['type'] == "copy":
+                        # The old generation's file was copied into place
+                        if hash == old_files['files'][path]['hash']:
+                            # The file on disk is unchanged since the last activation,
+                            # so we can overwrite it
+                            transactions.append(Transaction(new_file['source'], path, new_file['type']))
+                        else:
+                            # The file has been changed since the last activation,
+                            # so we can't overwrite it
+                            problems.append(path)
+                    else:
+                        # The old generation's file was not copied into place.
+                        # Because we know that the file on disk is a regular file,
+                        # and we've already checked by known hash, we know that we
+                        # can't overwrite this file
+                        problems.append(path)
+                else:
+                    # The old generation did not have a file at this path,
+                    # and this file's hash didn't match a known SHA for this path,
+                    # so we're not okay with overwriting it
+                    problems.append(path)
     else:
         # There is no file at this path
         transactions.append(Transaction(new_file['source'], path, new_file['type']))
@@ -108,7 +141,23 @@ for path in old_files['files']:
                 continue
         else:
             # The file is a regular file
-            continue
+
+            if old_file['type'] != "copy":
+                # This file wasn't copied into place at last activation (presumably a symlink)
+                # which means that the user changed it since then.
+                # Therefore we don't touch it
+                continue
+            
+            # Compute its hash and check it against `old_files['files'][path]['hash']`
+            # This should be equivalent to checking against `{STATIC_DIR}/{path}`
+            with open(path, "rb") as file:
+                hash = file_digest(file, "sha256").hexdigest()
+            if hash == old_file['hash']:
+                # The file has not changed since last activation, so we can remove it
+                transactions.append(Transaction(path, path, "remove"))
+            else:
+                # The file has been changed, so leave it alone
+                continue
     else:
         # There's no file at this path anymore, so we have nothing to do anyway
         continue
@@ -125,6 +174,8 @@ for t in transactions:
         match t.type:
             case "link":
                 print(f"ln -s {t.source} {t.destination}")
+            case "copy":
+                print(f"cp {t.source} {t.destination}")
             case "remove":
                 print(f"rm {t.source}")
             case _:
@@ -144,6 +195,9 @@ for t in transactions:
                     except FileExistsError:
                         pass
                 os.replace(temp_name, t.destination)
+            case "copy":
+                # TODO: ensure enclosing directory exists
+                shutil.copy(t.source, t.destination)
             case "remove":
                 os.remove(t.source)
             case _:
